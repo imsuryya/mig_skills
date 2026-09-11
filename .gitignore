@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+# migration run artifacts (state.db, generated code, plan projections)
+state.db*
+.planning/
+.active_plan

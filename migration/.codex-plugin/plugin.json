@@ -1,0 +1,42 @@
+{
+  "name": "migration",
+  "version": "0.5.0",
+  "description": "Exhaustively parse an ETL/data-prep artifact (Alteryx today; more sources planned) and migrate it to Databricks Lakeflow Spark Declarative Pipelines in PySpark -- as a plan, or as an executed, resumable, validation-gated migration for very large workflows.",
+  "author": {
+    "name": "Data Migration Skills"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "alteryx",
+    "databricks",
+    "declarative-pipelines",
+    "etl",
+    "lakebridge",
+    "lakeflow",
+    "migration",
+    "migration-state",
+    "pyspark",
+    "sdp",
+    "spark",
+    "validation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Data Migration to SDP",
+    "shortDescription": "Plan an ETL-to-Databricks-SDP migration",
+    "longDescription": "Two skills over one shared Databricks/SDP target. `alteryx-to-sdp` reads an Alteryx artifact tool by tool -- every filter condition, expression, join key, aggregation, container, and referenced macro -- traces field-level lineage, and produces an end-to-end plan to rebuild it as a Lakeflow Spark Declarative Pipeline: medallion architecture, tool-by-tool transformation map, translated expressions, data-quality expectations, parameterization, orchestration, optimization design, and parity testing. `alteryx-sdp-migrate` executes that migration for workflows too large for one context: Lakebridge for estate facts, a one-pass XML parse into a SQLite migration state, the DAG cut into dependency-ordered units with repeated blocks de-duplicated, BM25 retrieval of only the reference sections each unit needs, a gap and decision register that keeps facts distinguishable from inference, and structural/semantic/code/data validation gating completion. Resumable after any context loss.",
+    "developerName": "Data Migration Skills",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Parse this local ETL artifact tool by tool.",
+      "Give me a production-grade PySpark plan to migrate this to Databricks Lakeflow declarative pipelines.",
+      "Migrate this 1,500-tool Alteryx workflow to Databricks SDP, unit by unit, with validation."
+    ],
+    "brandColor": "#1B3139",
+    "screenshots": []
+  }
+}

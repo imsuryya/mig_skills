@@ -1,0 +1,19 @@
+{
+  "name": "mig-mcp",
+  "owner": {
+    "name": "Data Migration Skills"
+  },
+  "metadata": {
+    "description": "ETL-to-Databricks migration skills",
+    "version": "0.5.0"
+  },
+  "plugins": [
+    {
+      "name": "migration",
+      "source": "./migration",
+      "description": "Parse Alteryx workflows tool by tool and migrate them to Databricks Lakeflow Spark Declarative Pipelines in PySpark -- as a plan, or as an executed, resumable, validation-gated migration for workflows of 2,000+ tools.",
+      "category": "productivity",
+      "keywords": ["alteryx", "databricks", "sdp", "lakeflow", "pyspark", "etl", "migration"]
+    }
+  ]
+}

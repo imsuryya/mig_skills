@@ -1,0 +1,8 @@
+{
+  "name": "migration",
+  "description": "Migrate ETL/data-prep artifacts to Databricks Lakeflow Spark Declarative Pipelines (SDP): exhaustively parse an Alteryx workflow tool by tool and produce a production-grade PySpark plan, or run the migration end to end as a resumable, validation-gated process for workflows of 2,000+ tools.",
+  "version": "0.5.0",
+  "author": {
+    "name": "Data Migration Skills"
+  }
+}

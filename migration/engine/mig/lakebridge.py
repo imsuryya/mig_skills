@@ -1,0 +1,158 @@
+"""Lakebridge Analyzer integration.
+
+Lakebridge is the primary source of *estate-level* facts: file inventory,
+complexity band, tool census, function census, and the source/target endpoints
+behind every Input/Output tool. For Alteryx it is Analyzer-only -- the support
+matrix does not list Alteryx under Converter or Reconcile -- so it never emits
+ToolIDs, per-tool configuration, or the connection graph. Those come from
+parse.py. Both feed the same state.db; neither is re-read by the model.
+
+Command shape (Lakebridge >= 0.10):
+
+    databricks labs lakebridge analyze \
+        --source-directory <dir> \
+        --report-file <out.xlsx> \
+        --source-tech alteryx \
+        --generate-json true
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+
+from . import db
+
+SQL_HEAD_CHARS = 400   # keep endpoints and shape, drop the 49-line column list
+
+
+def analyzer_command(source_dir: str, report_file: str,
+                     source_tech: str = "alteryx") -> list[str]:
+    return [
+        "databricks", "labs", "lakebridge", "analyze",
+        "--source-directory", source_dir,
+        "--report-file", report_file,
+        "--source-tech", source_tech,
+        "--generate-json", "true",
+    ]
+
+
+def run_analyzer(source_dir: str, out_dir: str, timeout: int = 1800,
+                 source_tech: str = "alteryx"):
+    """Run the analyzer. Returns (json_path, stderr) or (None, reason)."""
+    if not source_tech:
+        return None, "this source adapter has no Lakebridge source-tech"
+    if not shutil.which("databricks"):
+        return None, "databricks CLI not on PATH"
+    os.makedirs(out_dir, exist_ok=True)
+    report = os.path.join(out_dir, "lakebridge-analysis.xlsx")
+    try:
+        proc = subprocess.run(
+            analyzer_command(source_dir, report, source_tech),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return None, "analyzer did not run: %s" % exc
+    js = os.path.splitext(report)[0] + ".json"
+    if os.path.isfile(js):
+        return js, proc.stderr[-2000:]
+    # Some builds name the json after the report stem in the same folder.
+    for cand in os.listdir(out_dir):
+        if cand.endswith(".json"):
+            return os.path.join(out_dir, cand), proc.stderr[-2000:]
+    return None, (proc.stderr or proc.stdout or "no json report produced")[-2000:]
+
+
+def ingest(con, json_path: str):
+    """Load an analyzer JSON report into state.db, keeping only what migration needs."""
+    with open(json_path, encoding="utf-8", errors="replace") as fh:
+        data = json.load(fh)
+
+    inventory = data.get("inventory") or []
+    rows = []
+    for rec in inventory:
+        statements = []
+        for st in rec.get("sqlStatements") or []:
+            sql = st.get("sql") or ""
+            statements.append({
+                "nodeName": st.get("nodeName"),
+                "connectionType": st.get("connectionType"),
+                "complexity": st.get("complexityLevel"),
+                "lineCount": st.get("lineCount"),
+                "objects": [o.get("object") for o in (st.get("objectRel") or []) if o.get("object")],
+                "actions": sorted({o.get("action") for o in (st.get("objectRel") or []) if o.get("action")}),
+                "sql_head": sql[:SQL_HEAD_CHARS],
+                "sql_chars": len(sql),
+            })
+        rows.append((
+            rec.get("sourceFile"), rec.get("name"), rec.get("complexityLevel"),
+            rec.get("type"), json.dumps(rec.get("nodes") or {}),
+            json.dumps(rec.get("functionCall") or {}), json.dumps(statements),
+        ))
+
+    con.execute("DELETE FROM lakebridge")
+    con.executemany(
+        "INSERT INTO lakebridge(source_file,name,complexity,type,node_census,"
+        "func_census,statements) VALUES(?,?,?,?,?,?,?)", rows)
+    db.set_meta(con, "lakebridge_run", data.get("runInfo") or {})
+    db.set_meta(con, "lakebridge_json", os.path.abspath(json_path))
+    con.commit()
+
+    census = {}
+    for r in rows:
+        for k, v in json.loads(r[4]).items():
+            census[k] = census.get(k, 0) + v
+    return {
+        "files": len(rows),
+        "tools": sum(census.values()),
+        "distinct_tool_types": len(census),
+        "statements": sum(len(json.loads(r[6])) for r in rows),
+    }
+
+
+def cross_check(con):
+    """Compare Lakebridge's census with our parse. Disagreement means one side
+    missed something, and a silent miss is exactly what we must not ship."""
+    lb = {}
+    for row in con.execute("SELECT node_census FROM lakebridge"):
+        for k, v in json.loads(row["node_census"]).items():
+            lb[k] = lb.get(k, 0) + v
+    if not lb:
+        return None
+
+    parsed = {}
+    for row in con.execute(
+            "SELECT plugin, tool_name, macro_path, count(*) c FROM nodes GROUP BY 1,2,3"):
+        # Lakebridge reports macro nodes as "Macro:<file>" and others by a short
+        # plugin alias; match on the trailing segment, which both agree on.
+        key = row["tool_name"]
+        parsed[key] = parsed.get(key, 0) + row["c"]
+
+    def norm(name):
+        # Lakebridge reports "AlteryxCrossTab" or "AlteryxBasePluginsGui.X.X";
+        # our parse reports the trailing plugin segment, "CrossTab". Reduce both
+        # to the bare tool name so the counts are comparable.
+        if name.startswith("Macro:"):
+            return "macro:" + os.path.basename(name[6:].replace("\\", "/")).lower()
+        base = name.split(".")[-1]
+        if base.startswith("Alteryx") and len(base) > 7:
+            base = base[7:]
+        return base.lower()
+
+    lb_n, p_n = {}, {}
+    for k, v in lb.items():
+        lb_n[norm(k)] = lb_n.get(norm(k), 0) + v
+    for k, v in parsed.items():
+        p_n[norm(k)] = p_n.get(norm(k), 0) + v
+
+    diffs = []
+    for k in sorted(set(lb_n) | set(p_n)):
+        a, b = lb_n.get(k, 0), p_n.get(k, 0)
+        if a != b:
+            diffs.append({"tool": k, "lakebridge": a, "parsed": b})
+    return {
+        "lakebridge_total": sum(lb_n.values()),
+        "parsed_total": sum(p_n.values()),
+        "mismatched_types": diffs,
+    }
