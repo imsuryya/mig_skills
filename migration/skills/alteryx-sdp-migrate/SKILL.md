@@ -167,7 +167,13 @@ database.
 python "$MIG" validate --all --level structural
 python "$MIG" status
 python "$MIG" report
+python "$MIG" export        # <run>/migration-export.xlsx
 ```
+
+`report` writes the markdown narrative; `export` writes the workbook a reviewer
+opens -- the Lakebridge analyzer report and every parsed fact, unit, decision,
+gap and validation in one .xlsx. Add `--full` to carry each tool's verbatim
+`<Configuration>` XML.
 
 A migration is COMPLETE only when `mig status` says so. Its gate:
 

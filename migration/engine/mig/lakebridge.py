@@ -133,12 +133,45 @@ def in_scope(con):
     return rows, out_of_scope
 
 
-def cross_check(con):
-    """Compare Lakebridge's census with our parse. Disagreement means one side
-    missed something, and a silent miss is exactly what we must not ship."""
+def normalize_tool_name(name):
+    """Reduce both sides' spelling of a tool to one comparable key.
+
+    Lakebridge reports "AlteryxCrossTab" or "AlteryxBasePluginsGui.X.X"; our
+    parse reports the trailing plugin segment, "CrossTab". Macro nodes arrive as
+    "Macro:<file>" from Lakebridge and as a resolved path from the parse.
+    """
+    if name.startswith("Macro:"):
+        return "macro:" + os.path.basename(name[6:].replace("\\", "/")).lower()
+    base = name.split(".")[-1]
+    if base.startswith("Alteryx") and len(base) > 7:
+        base = base[7:]
+    return base.lower()
+
+
+def census_compare(con, allow_unscoped=False):
+    """Per-tool-type census from both sides, every type, agreeing or not.
+
+    ``cross_check`` keeps only the disagreements because that is all the model
+    needs; the Excel export wants the whole table so a reviewer can see what
+    matched as well as what did not.
+
+    ``allow_unscoped`` covers a real failure mode: scoping matches analyzer rows
+    to parsed files by basename, so a workflow analyzed under a renamed copy --
+    an ASCII-safe name, say, because the original has non-ASCII characters --
+    scopes to nothing and the comparison silently disappears. Reporting tools
+    pass True to fall back to every analyzer row and say so via
+    ``scope_matched``; validation leaves it False so the check still refuses to
+    claim a pass it did not earn.
+    """
     scoped, out_of_scope = in_scope(con)
     if scoped is None:
         return None
+    scope_matched = bool(scoped)
+    if not scope_matched:
+        if not allow_unscoped:
+            return None
+        scoped = list(con.execute("SELECT source_file, node_census FROM lakebridge"))
+        out_of_scope = 0
     lb = {}
     for row in scoped:
         for k, v in json.loads(row["node_census"]).items():
@@ -147,38 +180,40 @@ def cross_check(con):
         return None
 
     parsed = {}
-    for row in con.execute(
-            "SELECT plugin, tool_name, macro_path, count(*) c FROM nodes GROUP BY 1,2,3"):
-        # Lakebridge reports macro nodes as "Macro:<file>" and others by a short
-        # plugin alias; match on the trailing segment, which both agree on.
-        key = row["tool_name"]
-        parsed[key] = parsed.get(key, 0) + row["c"]
-
-    def norm(name):
-        # Lakebridge reports "AlteryxCrossTab" or "AlteryxBasePluginsGui.X.X";
-        # our parse reports the trailing plugin segment, "CrossTab". Reduce both
-        # to the bare tool name so the counts are comparable.
-        if name.startswith("Macro:"):
-            return "macro:" + os.path.basename(name[6:].replace("\\", "/")).lower()
-        base = name.split(".")[-1]
-        if base.startswith("Alteryx") and len(base) > 7:
-            base = base[7:]
-        return base.lower()
+    for row in con.execute("SELECT tool_name, count(*) c FROM nodes GROUP BY 1"):
+        parsed[row["tool_name"]] = parsed.get(row["tool_name"], 0) + row["c"]
 
     lb_n, p_n = {}, {}
     for k, v in lb.items():
-        lb_n[norm(k)] = lb_n.get(norm(k), 0) + v
+        key = normalize_tool_name(k)
+        lb_n[key] = lb_n.get(key, 0) + v
     for k, v in parsed.items():
-        p_n[norm(k)] = p_n.get(norm(k), 0) + v
+        key = normalize_tool_name(k)
+        p_n[key] = p_n.get(key, 0) + v
 
-    diffs = []
-    for k in sorted(set(lb_n) | set(p_n)):
-        a, b = lb_n.get(k, 0), p_n.get(k, 0)
-        if a != b:
-            diffs.append({"tool": k, "lakebridge": a, "parsed": b})
+    rows = [{"tool": k, "lakebridge": lb_n.get(k, 0), "parsed": p_n.get(k, 0),
+             "delta": p_n.get(k, 0) - lb_n.get(k, 0)}
+            for k in sorted(set(lb_n) | set(p_n))]
     return {
+        "rows": rows,
         "lakebridge_total": sum(lb_n.values()),
         "parsed_total": sum(p_n.values()),
-        "mismatched_types": diffs,
         "files_out_of_scope": out_of_scope,
+        "scope_matched": scope_matched,
+    }
+
+
+def cross_check(con):
+    """Compare Lakebridge's census with our parse. Disagreement means one side
+    missed something, and a silent miss is exactly what we must not ship."""
+    cmp_ = census_compare(con)
+    if cmp_ is None:
+        return None
+    return {
+        "lakebridge_total": cmp_["lakebridge_total"],
+        "parsed_total": cmp_["parsed_total"],
+        "mismatched_types": [{"tool": r["tool"], "lakebridge": r["lakebridge"],
+                              "parsed": r["parsed"]}
+                             for r in cmp_["rows"] if r["delta"]],
+        "files_out_of_scope": cmp_["files_out_of_scope"],
     }

@@ -15,9 +15,11 @@ import sys
 
 if __package__ in (None, ""):        # allow `python engine/mig/cli.py`
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from mig import context, db, lakebridge, plan, retrieve, sources, units, validate
+    from mig import (context, db, export, lakebridge, plan, retrieve, sources, units,
+                     validate)
 else:
-    from . import context, db, lakebridge, plan, retrieve, sources, units, validate
+    from . import (context, db, export, lakebridge, plan, retrieve, sources, units,
+                   validate)
 
 # Workflow field names are routinely non-ASCII (this was built against a
 # Norwegian workflow) and the Windows console defaults to cp1252, which raises
@@ -542,6 +544,24 @@ def cmd_report(args):
                            "NOT COMPLETE -- " + "; ".join(comp["blockers"][:5]))])
 
 
+def cmd_export(args):
+    run = _run_dir(args)
+    con = db.connect(run)
+    out = args.out or os.path.join(run, "migration-export.xlsx")
+    res = export.build(con, run, out, lb_xlsx=args.lakebridge_xlsx,
+                       include_lakebridge=not args.no_lakebridge, full=args.full,
+                       complete=_is_complete(con))
+    lines = ["wrote %s (%.1f KB)" % (res["path"], res["bytes"] / 1024.0),
+             "  %d sheets: %d from state.db, %d from Lakebridge"
+             % (res["sheets"], res["mig_sheets"], res["lakebridge_sheets"]),
+             "  %d rows total" % res["rows"]]
+    if res["lakebridge_source"]:
+        lines.append("  analyzer report merged from %s" % res["lakebridge_source"])
+    if res["degraded"]:
+        lines.append("  DEGRADED: %s" % res["degraded"])
+    _emit(args, res, lines)
+
+
 def cmd_index(args):
     run = _run_dir(args) if (args.run or os.environ.get("MIG_RUN")) else None
     idx = retrieve.build_index(_corpus(args), _cache(run) if run else None)
@@ -665,6 +685,15 @@ def build_parser():
     s = sub.add_parser("report", help="write the final auditable report")
     s.add_argument("--out")
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("export", help="one .xlsx: Lakebridge report + parsed/AI facts")
+    s.add_argument("--out", help="default <run>/migration-export.xlsx")
+    s.add_argument("--lakebridge-xlsx", help="analyzer report to merge (default: auto-locate)")
+    s.add_argument("--no-lakebridge", action="store_true",
+                   help="engine sheets only")
+    s.add_argument("--full", action="store_true",
+                   help="include each tool's verbatim <Configuration> XML")
+    s.set_defaults(func=cmd_export)
 
     s = sub.add_parser("index", help="(re)build the skill retrieval index")
     s.set_defaults(func=cmd_index)

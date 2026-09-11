@@ -10,6 +10,7 @@ promising the user what the run will produce.
 - [RTK](#rtk)
 - [Planning-with-Files](#planning-with-files)
 - [Skill retrieval](#skill-retrieval)
+- [The Excel export](#the-excel-export)
 - [Checking the environment](#checking-the-environment)
 
 ## Lakebridge
@@ -141,6 +142,49 @@ available material per unit.
 
 Add corpora with `--corpus <dir>` (repeatable). The index rebuilds automatically
 when any indexed file changes.
+
+## The Excel export
+
+Two sources describe the same workflow and reviewers were opening both side by
+side. `mig export` merges them into one workbook:
+
+```bash
+python "$MIG" export                     # <run>/migration-export.xlsx
+python "$MIG" export --full              # + each tool's verbatim <Configuration>
+python "$MIG" export --no-lakebridge     # engine sheets only
+```
+
+**Engine sheets** (prefixed `MIG `, projected from `state.db`): Overview, Files,
+Tools, Connections, Expressions, Hazards, Units, Unit Tools, Decisions, Gaps,
+Validations, Artifacts, Census Crosscheck, SQL Endpoints. Decisions carry their
+`basis` (fact / mapping / inference / user), so extracted truth stays separable
+from AI judgement in the deliverable exactly as it is in the database.
+
+**Lakebridge sheets** are copied verbatim **under their original names**. Several
+of them reference their siblings by name in formulas
+(`'Jobs Transformations Xref'!...`), so renaming would silently break them. If an
+engine sheet and an analyzer sheet ever collide, the analyzer's copy is the one
+suffixed.
+
+`--full` is off by default because `config_xml` is the single largest column in
+the database and Excel caps a cell at 32767 characters; the export truncates
+past that rather than producing a file Excel refuses to open.
+
+**Writing xlsx with no dependencies.** `engine/mig/xlsx.py` reads and writes the
+format directly (a zip of XML parts) so `mig` keeps its stdlib-only contract and
+the export works on a locked-down analyst box. It is deliberately partial: inline
+strings, one header style, formulas preserved as text.
+
+**Degraded mode.** If the analyzer `.xlsx` cannot be found or read, the export
+rebuilds the essential Lakebridge sheets from the JSON already ingested into
+`state.db` and says `DEGRADED` on stdout. You lose the analyzer's formatting and
+its embedded-SQL detail, never the facts the migration actually used.
+
+**One caveat worth knowing.** The census cross-check scopes analyzer rows to
+parsed files *by filename*. A workflow analyzed under a renamed copy -- an
+ASCII-safe name, say -- scopes to nothing, and `lakebridge-parity` then skips
+rather than passes. The export still prints the comparison but labels it
+unscoped with a warning row; treat that as a cross-check that did not happen.
 
 ## Checking the environment
 

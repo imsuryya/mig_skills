@@ -169,6 +169,24 @@ def _bound_names(tree):
     return bound
 
 
+def _dropped_with_reason(con, unit_id):
+    """A unit deliberately layered 'drop' needs no target code.
+
+    The migration model allows a tool to be legitimately excluded with a
+    stated reason. We honour that here only when the reason is actually on
+    record -- i.e. a doc artifact is attached -- so a unit cannot be waved
+    through by setting its layer alone. Returns the doc path, or None.
+    """
+    row = con.execute("SELECT layer FROM units WHERE unit_id=?", (unit_id,)).fetchone()
+    if not row or (row["layer"] or "") != "drop":
+        return None
+    doc = con.execute(
+        "SELECT path FROM artifacts WHERE unit_id=? AND role='doc'", (unit_id,)).fetchone()
+    if doc and os.path.isfile(doc["path"]):
+        return doc["path"]
+    return None
+
+
 def code(con, unit_id, artifact_paths=None):
     _clear(con, unit_id, "code")
     _source, target = _adapters(con)
@@ -176,6 +194,12 @@ def code(con, unit_id, artifact_paths=None):
         "SELECT path FROM artifacts WHERE unit_id=? AND role IN ('pyspark','sdp')", (unit_id,))]
     paths = [p for p in paths if os.path.isfile(p)]
     if not paths:
+        doc = _dropped_with_reason(con, unit_id)
+        if doc:
+            _record(con, unit_id, "code", "artifact-present", "skip",
+                    "unit layered 'drop'; reason recorded in %s" % os.path.basename(doc))
+            con.commit()
+            return summary(con, unit_id, "code")
         _record(con, unit_id, "code", "artifact-present", "fail",
                 "no generated code recorded for this unit")
         con.commit()
@@ -246,6 +270,12 @@ def semantic(con, unit_id, artifact_paths=None):
         "SELECT path FROM artifacts WHERE unit_id=? AND role IN ('pyspark','sdp')", (unit_id,))]
     paths = [p for p in paths if os.path.isfile(p)]
     if not paths:
+        doc = _dropped_with_reason(con, unit_id)
+        if doc:
+            _record(con, unit_id, "semantic", "artifact-present", "skip",
+                    "unit layered 'drop'; reason recorded in %s" % os.path.basename(doc))
+            con.commit()
+            return summary(con, unit_id, "semantic")
         _record(con, unit_id, "semantic", "artifact-present", "fail",
                 "no generated code recorded for this unit")
         con.commit()

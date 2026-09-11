@@ -9,6 +9,7 @@ population StdDev, a multi-anchor Filter, and an IO tool at each end.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -18,7 +19,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE_ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ENGINE_ROOT)
 
-from mig import context, db, lakebridge, plan, retrieve, sources, units, validate  # noqa: E402
+from mig import (context, db, export, lakebridge, plan, retrieve, sources, units,  # noqa: E402
+                 validate, xlsx)
 from mig.cli import _is_complete, default_corpus  # noqa: E402
 
 parse = sources.get("alteryx")
@@ -585,6 +587,152 @@ class TestAdapterContract(unittest.TestCase):
         self.assertIn("references", roots)
         self.assertIn("alteryx-to-sdp", roots)
         self.assertIn("alteryx-sdp-migrate", roots)
+
+
+class TestXlsx(unittest.TestCase):
+    """The writer has no library behind it, so a round-trip is the only proof."""
+
+    def _roundtrip(self, sheets):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "wb.xlsx")
+        xlsx.write(path, sheets)
+        return {name: rows for name, rows in xlsx.read(path)}
+
+    def test_values_survive_a_round_trip_with_their_types(self):
+        back = self._roundtrip([xlsx.Sheet("S", [["h1", "h2", "h3"], ["text", 42, 1.5]])])
+        self.assertEqual(back["S"][0], ["h1", "h2", "h3"])
+        self.assertEqual(back["S"][1], ["text", 42, 1.5])
+
+    def test_formulas_round_trip_as_formulas(self):
+        back = self._roundtrip([xlsx.Sheet("S", [["a"], ["='Other Sheet'!A1"]])])
+        self.assertEqual(back["S"][1][0], "='Other Sheet'!A1")
+
+    def test_non_ascii_and_xml_metacharacters_survive(self):
+        row = ["Helårsboligomsetninger", "a < b & c > d", '"quoted"']
+        back = self._roundtrip([xlsx.Sheet("S", [["h1", "h2", "h3"], row])])
+        self.assertEqual(back["S"][1], row)
+
+    def test_control_characters_are_stripped_not_raised_on(self):
+        back = self._roundtrip([xlsx.Sheet("S", [["h"], ["a\x00b\x07c"]])])
+        self.assertEqual(back["S"][1][0], "abc")
+
+    def test_oversized_cell_is_truncated_to_excels_limit(self):
+        back = self._roundtrip([xlsx.Sheet("S", [["h"], ["x" * (xlsx.CELL_LIMIT + 500)]])])
+        self.assertEqual(len(back["S"][1][0]), xlsx.CELL_LIMIT)
+
+    def test_gaps_in_a_row_keep_later_columns_aligned(self):
+        back = self._roundtrip([xlsx.Sheet("S", [["a", "b", "c"], [None, None, "third"]])])
+        self.assertEqual(back["S"][1][2], "third")
+
+    def test_sheet_names_are_sanitised_and_deduplicated(self):
+        taken = set()
+        self.assertEqual(xlsx.safe_sheet_name("a/b:c", taken), "a-b-c")
+        self.assertEqual(xlsx.safe_sheet_name("a/b:c", taken), "a-b-c~2")
+        self.assertEqual(len(xlsx.safe_sheet_name("x" * 60, taken)), xlsx.SHEET_NAME_LIMIT)
+
+
+class TestExport(Base):
+    def _build(self, **kw):
+        out = os.path.join(self.run, "export.xlsx")
+        res = export.build(self.con, self.run, out, complete=_is_complete(self.con), **kw)
+        return res, {name: rows for name, rows in xlsx.read(out)}
+
+    def setUp(self):
+        super().setUp()
+        self.extract()
+        units.build(self.con, max_unit=10, min_unit=1)
+
+    def test_every_parsed_tool_reaches_the_workbook(self):
+        _, book = self._build()
+        tools = book["MIG Tools"]
+        n = self.con.execute("SELECT count(*) c FROM nodes").fetchone()["c"]
+        self.assertEqual(len(tools) - 1, n)          # -1 for the header row
+
+    def test_expressions_reach_the_workbook_verbatim(self):
+        _, book = self._build()
+        col = book["MIG Expressions"][0].index("expression")
+        written = {r[col] for r in book["MIG Expressions"][1:]}
+        for row in self.con.execute("SELECT expr FROM expressions"):
+            self.assertIn(row["expr"], written)
+
+    def test_configuration_xml_is_excluded_unless_full_is_asked_for(self):
+        _, book = self._build()
+        self.assertNotIn("config_xml", book["MIG Tools"][0])
+        _, full = self._build(full=True)
+        self.assertIn("config_xml", full["MIG Tools"][0])
+
+    def test_decisions_carry_their_basis_so_facts_stay_separable(self):
+        self.con.execute(
+            "INSERT INTO decisions(unit_id,basis,summary,created_at) VALUES('U001','fact','x',0)")
+        self.con.commit()
+        _, book = self._build()
+        header = book["MIG Decisions"][0]
+        self.assertIn("basis", header)
+        self.assertEqual(book["MIG Decisions"][1][header.index("basis")], "fact")
+
+    def test_export_works_with_no_lakebridge_data(self):
+        res, book = self._build()
+        self.assertEqual(res["lakebridge_sheets"], 0)
+        self.assertIn("MIG Overview", book)
+
+    def test_merged_lakebridge_sheets_keep_their_original_names(self):
+        src = os.path.join(self.run, "lakebridge", "lakebridge-analysis.xlsx")
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        # A formula referencing a sibling by name is exactly what renaming breaks.
+        xlsx.write(src, [xlsx.Sheet("Jobs Transformations Xref", [["Job"], ["w"]]),
+                         xlsx.Sheet("Summary", [["Total"], ["='Jobs Transformations Xref'!A2"]])])
+        res, book = self._build()
+        self.assertEqual(res["lakebridge_sheets"], 2)
+        self.assertIn("Jobs Transformations Xref", book)
+        self.assertEqual(book["Summary"][1][0], "='Jobs Transformations Xref'!A2")
+
+    def test_a_lakebridge_sheet_never_displaces_an_engine_sheet(self):
+        src = os.path.join(self.run, "lakebridge", "lakebridge-analysis.xlsx")
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        xlsx.write(src, [xlsx.Sheet("MIG Tools", [["collides"], ["with ours"]])])
+        _, book = self._build()
+        self.assertIn("collides", book["MIG Tools~2"][0])
+        self.assertIn("node_key", book["MIG Tools"][0])
+
+
+class TestCensusScoping(Base):
+    """A workflow analysed under a renamed copy must not silently lose the check."""
+
+    def _ingest_census(self, source_file):
+        self.con.execute(
+            "INSERT INTO lakebridge(source_file,name,complexity,type,node_census,"
+            "func_census,statements) VALUES(?,?,?,?,?,?,?)",
+            (source_file, "w", "LOW", "JOB", json.dumps({"AlteryxFormula": 1}), "{}", "[]"))
+        self.con.commit()
+
+    def test_unmatched_filename_makes_the_cross_check_refuse_to_report(self):
+        self.extract()
+        self._ingest_census("renamed_copy.yxmd")
+        self.assertIsNone(lakebridge.cross_check(self.con))
+
+    def test_reporting_may_fall_back_unscoped_but_says_so(self):
+        self.extract()
+        self._ingest_census("renamed_copy.yxmd")
+        cmp_ = lakebridge.census_compare(self.con, allow_unscoped=True)
+        self.assertIsNotNone(cmp_)
+        self.assertFalse(cmp_["scope_matched"])
+
+    def test_a_matching_filename_scopes_normally(self):
+        self.extract()
+        self._ingest_census(os.path.basename(FIXTURE))
+        cmp_ = lakebridge.census_compare(self.con)
+        self.assertTrue(cmp_["scope_matched"])
+
+    def test_the_workbook_warns_when_the_census_could_not_be_scoped(self):
+        self.extract()
+        units.build(self.con, max_unit=10, min_unit=1)
+        self._ingest_census("renamed_copy.yxmd")
+        out = os.path.join(self.run, "export.xlsx")
+        export.build(self.con, self.run, out, complete=_is_complete(self.con))
+        book = {name: rows for name, rows in xlsx.read(out)}
+        text = "\n".join(str(c) for r in book["MIG Census Crosscheck"] for c in r)
+        self.assertIn("WARNING", text)
 
 
 class TestSourceSelectionPersists(Base):

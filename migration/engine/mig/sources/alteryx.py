@@ -684,6 +684,36 @@ required_constructs = {
                         "row_number/monotonically_increasing_id"),
 }
 
+def _window_order_args(src):
+    """Argument text of every ``Window.partitionBy(...).orderBy(...)``.
+
+    Scans with balanced parentheses rather than a flat ``[^)]*``: an order key
+    is normally written ``F.col("x").asc()``, whose inner ``)`` would end a
+    naive match after the first key and make a correctly tie-broken window
+    look like a single-key one.
+    """
+    out = []
+    for m in re.finditer(r"Window\s*\.\s*partitionBy\(", src):
+        i, depth = m.end(), 1
+        while i < len(src) and depth:
+            depth += (src[i] == "(") - (src[i] == ")")
+            i += 1
+        if depth:
+            continue
+        tail = src[i:]
+        om = re.match(r"\s*\.\s*orderBy\(", tail)
+        if not om:
+            continue
+        j, depth = om.end(), 1
+        while j < len(tail) and depth:
+            depth += (tail[j] == "(") - (tail[j] == ")")
+            j += 1
+        if depth:
+            continue
+        out.append(tail[om.end():j - 1])
+    return out
+
+
 ORDER_DEPENDENT = ("MultiRowFormula", "RunningTotal", "Tile", "Sample", "Unique")
 
 
@@ -718,7 +748,7 @@ def semantic_checks(ctx):
     # Ordered operations need a deterministic order, including a tiebreak.
     ordered = sum(census.get(t, 0) for t in ORDER_DEPENDENT)
     if ordered:
-        wins = re.findall(r"Window\s*\.\s*partitionBy\([^)]*\)\s*\.\s*orderBy\(([^)]*)\)", src)
+        wins = _window_order_args(src)
         has_order = bool(wins) or bool(re.search(r"\.\s*orderBy\s*\(", src))
         if not has_order:
             ctx.record("deterministic-order", "fail",

@@ -152,7 +152,11 @@ def build(con, max_unit=DEFAULT_MAX_UNIT, min_unit=DEFAULT_MIN_UNIT, keep_viewer
     sizes = {gid: len(m) for gid, m in raw_units}
     members_by = {gid: list(m) for gid, m in raw_units}
 
-    for gid, members in sorted(raw_units, key=lambda x: len(x[1])):
+    for gid, _raw_members in sorted(raw_units, key=lambda x: len(x[1])):
+        # Use the unit's CURRENT membership, not its original raw members: a
+        # unit that has already absorbed others must carry those nodes with it
+        # when it is itself absorbed, or they stay pointed at an emptied gid.
+        members = members_by[gid]
         if sizes.get(gid, 0) == 0 or sizes[gid] >= min_unit:
             continue
         upstream = defaultdict(int)
