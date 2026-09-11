@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -19,8 +20,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE_ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ENGINE_ROOT)
 
-from mig import (context, db, export, lakebridge, plan, retrieve, sources, units,  # noqa: E402
-                 validate, xlsx)
+from mig import (context, db, export, lakebridge, plan, retrieve, rtk,  # noqa: E402
+                 sources, units, validate, xlsx)
 from mig import cli  # noqa: E402
 from mig.cli import _is_complete, default_corpus  # noqa: E402
 
@@ -699,6 +700,85 @@ class TestAdapterContract(unittest.TestCase):
         self.assertIn("references", roots)
         self.assertIn("alteryx-to-sdp", roots)
         self.assertIn("alteryx-sdp-migrate", roots)
+
+
+class TestRtk(unittest.TestCase):
+    """RTK is optional in both directions: absent must work, present must not alter."""
+
+    def setUp(self):
+        self.original = os.environ.get(rtk.DISABLE_ENV)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self.original is None:
+            os.environ.pop(rtk.DISABLE_ENV, None)
+        else:
+            os.environ[rtk.DISABLE_ENV] = self.original
+
+    def _pretend(self, installed):
+        rtk.shutil.which = lambda name: "/usr/bin/rtk" if installed else None
+        self.addCleanup(setattr, rtk.shutil, "which", shutil.which)
+
+    def test_command_is_untouched_when_rtk_is_absent(self):
+        self._pretend(False)
+        cmd, used = rtk.wrap(["databricks", "labs", "lakebridge"])
+        self.assertEqual(cmd, ["databricks", "labs", "lakebridge"])
+        self.assertFalse(used)
+
+    def test_command_is_proxied_when_rtk_is_present(self):
+        self._pretend(True)
+        cmd, used = rtk.wrap(["databricks", "labs", "lakebridge"])
+        self.assertEqual(cmd, ["rtk", "proxy", "databricks", "labs", "lakebridge"])
+        self.assertTrue(used)
+
+    def test_wrapping_never_reorders_or_drops_arguments(self):
+        self._pretend(True)
+        base = lakebridge.analyzer_command("/src", "/out/r.xlsx", "alteryx")
+        cmd, _ = rtk.wrap(base)
+        self.assertEqual(cmd[2:], base)
+
+    def test_opt_out_env_var_forces_direct_invocation(self):
+        self._pretend(True)
+        os.environ[rtk.DISABLE_ENV] = "1"
+        cmd, used = rtk.wrap(["git", "status"])
+        self.assertFalse(used)
+        self.assertEqual(cmd, ["git", "status"])
+        self.assertIn(rtk.DISABLE_ENV, rtk.status()["note"])
+
+    def test_status_tells_the_user_which_way_the_run_went(self):
+        self._pretend(True)
+        self.assertTrue(rtk.status()["available"])
+        self._pretend(False)
+        absent = rtk.status()
+        self.assertFalse(absent["available"])
+        self.assertIn("rtk init -g", absent["note"])
+
+    def test_empty_command_is_not_wrapped(self):
+        self._pretend(True)
+        self.assertEqual(rtk.wrap([]), ([], False))
+
+
+class TestRetrievalServesBothSkills(unittest.TestCase):
+    """The second skill's references must be reachable from the same index."""
+
+    def test_both_skills_references_are_in_the_corpus(self):
+        idx = retrieve.build_index(CORPUS)
+        dirs = {os.path.basename(os.path.dirname(os.path.dirname(d["path"])))
+                for d in idx["docs"]}
+        self.assertIn("alteryx-to-sdp", dirs)
+        self.assertIn("alteryx-sdp-migrate", dirs)
+
+    def test_the_tool_yaml_chunks_one_entry_per_plugin(self):
+        idx = retrieve.build_index(CORPUS)
+        yaml_chunks = [d for d in idx["docs"]
+                       if d["path"].lower().endswith((".yaml", ".yml"))]
+        self.assertGreater(len(yaml_chunks), 50)
+
+    def test_a_tool_query_returns_that_tool_not_the_whole_reference(self):
+        idx = retrieve.build_index(CORPUS)
+        hits = retrieve.search(idx, "CrossTab pivot key field", top_k=4)
+        self.assertTrue(hits)
+        self.assertLess(sum(len(h["text"]) for h in hits), 20000)
 
 
 class TestXlsx(unittest.TestCase):

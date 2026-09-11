@@ -62,8 +62,30 @@ def _chunk_markdown(path, text):
     return chunks
 
 
+YAML_KEY = re.compile(r"^[A-Za-z0-9_.\-]+:")
+YAML_ITEM = re.compile(r"^-\s+\S")
+# What to call a sequence entry, in order of preference.
+YAML_LABEL = re.compile(r"^\s*(?:-\s+)?(tool_name|name|plugin_name|id)\s*:\s*(\S.*?)\s*$")
+
+
+def _yaml_label(lines, fallback):
+    for ln in lines[:8]:
+        m = YAML_LABEL.match(ln)
+        if m:
+            return m.group(2)
+    return fallback
+
+
 def _chunk_yaml(path, text):
-    """Top-level-key chunks; the tool reference is one entry per plugin."""
+    """One chunk per top-level entry.
+
+    Two shapes appear in this repo and both must index. A *mapping* chunks per
+    top-level key. A *sequence* chunks per `- ` item -- which is how
+    `designer-tool-reference.yaml` lists its plugins, and which the key-only
+    split missed entirely: the largest reference in the corpus produced zero
+    chunks and was silently absent from retrieval. Sequence entries are titled by
+    their own `tool_name`/`name`, so a query for a tool finds that tool.
+    """
     chunks, cur, key = [], [], None
     title = os.path.basename(path)
 
@@ -77,11 +99,18 @@ def _chunk_yaml(path, text):
                                    "text": body[i:i + MAX_CHUNK_CHARS]})
 
     for ln in text.splitlines():
-        if re.match(r"^[A-Za-z0-9_.\-]+:", ln):
+        if YAML_ITEM.match(ln):
+            flush()
+            cur = [ln]
+            key = _yaml_label(cur, "entry %d" % (len(chunks) + 1))
+        elif YAML_KEY.match(ln):
             flush()
             key, cur = ln.split(":", 1)[0], [ln]
         else:
             cur.append(ln)
+            # A sequence item's label usually sits on a later line than its dash.
+            if key and key.startswith("entry "):
+                key = _yaml_label(cur, key)
     flush()
     return chunks
 

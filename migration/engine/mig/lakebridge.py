@@ -22,7 +22,7 @@ import os
 import shutil
 import subprocess
 
-from . import db
+from . import db, rtk
 
 SQL_HEAD_CHARS = 400   # keep endpoints and shape, drop the 49-line column list
 
@@ -40,20 +40,33 @@ def analyzer_command(source_dir: str, report_file: str,
 
 def run_analyzer(source_dir: str, out_dir: str, timeout: int = 1800,
                  source_tech: str = "alteryx"):
-    """Run the analyzer. Returns (json_path, stderr) or (None, reason)."""
+    """Run the analyzer. Returns (json_path, stderr) or (None, reason).
+
+    The analyzer is spawned directly rather than through the Bash tool, so RTK's
+    PreToolUse hook cannot see it; `rtk.wrap` puts it back under RTK when that is
+    installed. A failure under RTK is always retried bare -- compressing output
+    is a convenience, and it must never be the reason a migration has no estate
+    facts.
+    """
     if not source_tech:
         return None, "this source adapter has no Lakebridge source-tech"
     if not shutil.which("databricks"):
         return None, "databricks CLI not on PATH"
     os.makedirs(out_dir, exist_ok=True)
     report = os.path.join(out_dir, "lakebridge-analysis.xlsx")
+    base = analyzer_command(source_dir, report, source_tech)
+    cmd, used_rtk = rtk.wrap(base)
     try:
-        proc = subprocess.run(
-            analyzer_command(source_dir, report, source_tech),
-            capture_output=True, text=True, timeout=timeout,
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if used_rtk and proc.returncode != 0 and not os.path.isfile(report):
+            proc = subprocess.run(base, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
-        return None, "analyzer did not run: %s" % exc
+        if not used_rtk:
+            return None, "analyzer did not run: %s" % exc
+        try:
+            proc = subprocess.run(base, capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as exc2:
+            return None, "analyzer did not run: %s" % exc2
     js = os.path.splitext(report)[0] + ".json"
     if os.path.isfile(js):
         return js, proc.stderr[-2000:]
@@ -97,6 +110,13 @@ def ingest(con, json_path: str):
         "func_census,statements) VALUES(?,?,?,?,?,?,?)", rows)
     db.set_meta(con, "lakebridge_run", data.get("runInfo") or {})
     db.set_meta(con, "lakebridge_json", os.path.abspath(json_path))
+    # Record the workbook beside the json while we can still see it. A later
+    # re-ingest from a derived json (a rescoped copy, say) has no workbook of its
+    # own, and without this the original becomes unreachable -- the export then
+    # silently degrades to sheets rebuilt from state.db.
+    sibling = os.path.splitext(os.path.abspath(json_path))[0] + ".xlsx"
+    if os.path.isfile(sibling):
+        db.set_meta(con, "lakebridge_xlsx", sibling)
     con.commit()
 
     census = {}

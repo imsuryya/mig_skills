@@ -91,9 +91,28 @@ Two things worth knowing:
 **Where it matters here.** `mig` output is already compact by design -- that is
 why the CLI has `--json`/`--compact` and prints summaries rather than dumps. RTK
 earns its place on everything *around* the migration: `databricks` CLI calls,
-`pytest`, linting, git, and the Lakebridge run itself.
+`pytest`, linting and git.
 
-**Degraded mode.** Nothing breaks. Keep third-party output small by hand:
+**The one command the hook cannot see.** `mig extract` spawns the analyzer with
+`subprocess.run`, not through the Bash tool, so the PreToolUse hook never gets a
+chance at the noisiest third-party command in the pipeline. The engine closes
+that itself: `engine/mig/rtk.py` prefixes `rtk proxy` when rtk is on PATH.
+`proxy` is the documented raw-passthrough form -- RTK optimizes commands it
+recognises (git, ls, cargo) and `databricks` is not one, so proxy is the shape
+that cannot alter the command's behaviour. `mig extract` prints which way it
+went:
+
+```
+rtk: third-party commands routed through `rtk proxy`
+rtk: not installed; third-party output not compressed (`rtk init -g` to enable)
+```
+
+Set `MIG_NO_RTK=1` to force direct invocation where rtk is installed.
+
+**Degraded mode.** Nothing breaks, in either direction. Without rtk the analyzer
+runs bare; and if a wrapped run fails without producing a report, the engine
+retries it unwrapped -- compressing output is a convenience and must never be
+why a migration has no estate facts. Keep third-party output small by hand:
 `| head`, `--quiet`, and targeted queries rather than full dumps.
 
 Config: `~/.config/rtk/config.toml`, `[hooks] exclude_commands = [...]`.
@@ -142,6 +161,17 @@ available material per unit.
 
 Add corpora with `--corpus <dir>` (repeatable). The index rebuilds automatically
 when any indexed file changes.
+
+**Both skills use it.** The corpus is every `skills/*/references/` directory plus
+the shared `references/`, so `alteryx-to-sdp` retrieves from the same index --
+`python "$MIG" retrieve "<tool> <construct>"`, no run directory needed. That
+matters most for `designer-tool-reference.yaml` (2,586 lines), which chunks by
+top-level key and so returns one entry per plugin.
+
+**What is not retrieved.** Checklists are read in full --
+`references/lakebridge-gap-set.md`, `sdp-production.md`, `sdp-optimization.md`.
+Top-K over a checklist silently drops items, and "apply every item" is the whole
+point of those three.
 
 ## The Excel export
 

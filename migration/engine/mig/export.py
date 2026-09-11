@@ -44,8 +44,11 @@ def _ts(value):
 
 def find_report_xlsx(con, run):
     """Locate the analyzer's .xlsx: beside the ingested json, or in <run>/lakebridge."""
-    js = db.get_meta(con, "lakebridge_json")
     candidates = []
+    recorded = db.get_meta(con, "lakebridge_xlsx")
+    if recorded:
+        candidates.append(recorded)
+    js = db.get_meta(con, "lakebridge_json")
     if js:
         candidates.append(os.path.splitext(js)[0] + ".xlsx")
         folder = os.path.dirname(js)

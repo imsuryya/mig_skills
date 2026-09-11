@@ -35,6 +35,37 @@ Shared (Databricks / SDP target — reused by every `*-to-sdp` skill):
 - `../../references/sdp-production.md` — production-hardening checklist: PySpark-not-SQL rule, determinism, expectations catalog, parameterization/secrets, CDC/SCD, streaming-vs-batch, orchestration, governance/PII, testing, project skeleton, deliverable checklist, and (§12–17) Databricks Asset Bundles deployment, pipeline settings, job orchestration, Unity Catalog governance, CI/CD, and observability.
 - `../../references/sdp-optimization.md` — performance: ingest-once, joins/broadcast, aggregation/pivots, window discipline, storage layout, compute, anti-patterns, plus streaming/Auto Loader trigger sizing and state bounds, incremental-vs-full materialized-view cost, and Delta table features/maintenance (deletion vectors, predictive optimization, data skipping).
 
+### Retrieve lookups; read checklists in full
+
+These references total ~4,300 lines and `designer-tool-reference.yaml` alone is
+2,586 — more than a workflow's worth of context before you have parsed anything.
+Use BM25 retrieval for **lookups**, where you need the few sections that describe
+the tool actually in front of you:
+
+```bash
+MIG=<plugin-root>/engine/mig.py      # ../../engine/mig.py from this skill
+python "$MIG" retrieve "CrossTab key field method" --top-k 4
+python "$MIG" retrieve "DateTimeParse format string locale" --top-k 4
+```
+
+No run directory, no install, no network — the index covers every reference in
+this repo, chunked by heading (Markdown) and by top-level key (YAML, so the tool
+reference returns one entry per plugin). This is the same technique the
+`skill-retrieval` plugin uses (BM25, k1=1.5, b=0.75, top-K per turn); that plugin
+is Hermes-only and will not load in Claude Code, so the engine implements it
+directly in `engine/mig/retrieve.py`.
+
+**Retrieve for:** per-tool parse keys, a formula function's semantics, one
+expression's translation, an anchor or plugin name.
+
+**Read in full — never retrieve:** `references/lakebridge-gap-set.md` before
+Phase 1 (it decides what you parse), and `../../references/sdp-production.md` and
+`../../references/sdp-optimization.md` in Phases 3b/3c. Those two are checklists
+where every item must be applied; a top-K slice of a checklist silently drops
+items, which is the one failure this skill cannot afford.
+
+If the engine is unavailable, fall back to reading the reference files directly.
+
 ## Scope Intake
 
 Before parsing, establish and record (state anything the user has not provided as an open question in the plan, never guess):
@@ -103,7 +134,7 @@ One row for **every** source `ToolID`:
 - **Target construct** is concrete PySpark DataFrame-API code or a precise pattern (`df.groupBy(*GK).agg(F.stddev_pop("x"))`, `F.row_number().over(Window.partitionBy(k).orderBy(o))==1`), never a vague phrase, never a SQL string.
 - **Target layer** is Bronze / Silver / Silver-grain / Gold-metric / Gold-serve / Job / Drop.
 - **Confidence**: `direct` (1:1), `adapted` (works with a documented semantic change), `needs-design` (needs a team decision — every order-dependent tool), `no-equivalent` (no native path — propose an approach or scope out).
-- Translate every expression with `references/alteryx-formula-to-spark.md`. Note 1-based index shifts (`Left`, `Substring`), null-concatenation, date format-string conversion, regex dialect, case-insensitive `Contains`.
+- Translate every expression with `references/alteryx-formula-to-spark.md`. Note 1-based index shifts (`Left`, `Substring`), null-concatenation, date format-string conversion, regex dialect, case-insensitive `Contains`. Retrieve per tool rather than holding the whole table — `python "$MIG" retrieve "<tool> <construct>" --top-k 4`.
 - Disabled tools and out-of-scope tools (reporting, spatial-without-a-library, predictive) still appear, with their disposition.
 
 For a large workflow, generate this table programmatically from the Phase-1 parser output into a CSV companion file.

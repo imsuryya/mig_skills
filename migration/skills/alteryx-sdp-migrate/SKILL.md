@@ -38,7 +38,7 @@ way, and the user should know which.
 | Tool | Purpose | Install | If missing |
 |------|---------|---------|-----------|
 | Lakebridge | estate facts + an independent tool census to cross-check the parse | `databricks labs install lakebridge` | run with `--no-lakebridge`; the parse still covers every tool, but the two-source structural check cannot run |
-| RTK | compresses noisy third-party command output | `rtk init -g`, then restart | `mig` output is already compact; only third-party commands get noisy |
+| RTK | compresses noisy third-party command output, including the analyzer the engine spawns itself | `rtk init -g`, then restart | `mig` output is already compact; the analyzer runs unwrapped and its output stays verbose |
 | Planning-with-Files | the on-disk plan format this skill writes | `/plugin marketplace add OthmanAdi/planning-with-files` | `mig plan` still writes `task_plan.md` / `findings.md` / `progress.md`; you just don't get its slash commands |
 
 `mig` itself is stdlib-only Python 3.10+. No install, no network.

@@ -15,11 +15,11 @@ import sys
 
 if __package__ in (None, ""):        # allow `python engine/mig/cli.py`
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from mig import (context, db, export, lakebridge, plan, retrieve, sources, units,
-                     validate)
+    from mig import (context, db, export, lakebridge, plan, retrieve, rtk, sources,
+                     units, validate)
 else:
-    from . import (context, db, export, lakebridge, plan, retrieve, sources, units,
-                   validate)
+    from . import (context, db, export, lakebridge, plan, retrieve, rtk, sources,
+                   units, validate)
 
 # Workflow field names are routinely non-ASCII (this was built against a
 # Norwegian workflow) and the Windows console defaults to cp1252, which raises
@@ -145,12 +145,15 @@ def cmd_extract(args):
 
     stats = source.extract(con, wf, macro_paths)
     cc = lakebridge.cross_check(con)
-    out = {"parse": stats, "lakebridge": lb_info, "cross_check": cc}
+    rtk_status = rtk.status()
+    out = {"parse": stats, "lakebridge": lb_info, "cross_check": cc, "rtk": rtk_status}
     lines = ["parsed %(files)s file(s): %(nodes)s tools, %(edges)s connections, "
              "%(expressions)s expressions, %(hazards)s hazards" % stats]
     if lb_info:
         lines.append("lakebridge: %(files)s file(s), %(tools)s tools, %(statements)s statements"
                      % lb_info)
+    if not args.no_lakebridge:
+        lines.append("rtk: %s" % rtk_status["note"])
     if cc:
         lines.append("cross-check: lakebridge %d vs parsed %d -- %s" % (
             cc["lakebridge_total"], cc["parsed_total"],
