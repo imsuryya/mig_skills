@@ -111,11 +111,36 @@ def ingest(con, json_path: str):
     }
 
 
+def in_scope(con):
+    """The set of analyzer rows that describe *this* workflow.
+
+    `analyze --source-directory` sweeps a whole tree, so a workflow sitting in a
+    shared folder drags in every unrelated object beside it. Scope by the files
+    the parse actually walked -- the workflow and the macros it reaches -- so an
+    estate total is never mistaken for a workflow total.
+    """
+    parsed = {os.path.basename(os.path.normpath(r["path"].replace("\\", "/"))).lower()
+              for r in con.execute("SELECT path FROM files")}
+    if not parsed:
+        return None, 0
+    rows, out_of_scope = [], 0
+    for row in con.execute("SELECT source_file, node_census FROM lakebridge"):
+        src = (row["source_file"] or "").replace("\\", "/")
+        if os.path.basename(src).lower() in parsed:
+            rows.append(row)
+        else:
+            out_of_scope += 1
+    return rows, out_of_scope
+
+
 def cross_check(con):
     """Compare Lakebridge's census with our parse. Disagreement means one side
     missed something, and a silent miss is exactly what we must not ship."""
+    scoped, out_of_scope = in_scope(con)
+    if scoped is None:
+        return None
     lb = {}
-    for row in con.execute("SELECT node_census FROM lakebridge"):
+    for row in scoped:
         for k, v in json.loads(row["node_census"]).items():
             lb[k] = lb.get(k, 0) + v
     if not lb:
@@ -155,4 +180,5 @@ def cross_check(con):
         "lakebridge_total": sum(lb_n.values()),
         "parsed_total": sum(p_n.values()),
         "mismatched_types": diffs,
+        "files_out_of_scope": out_of_scope,
     }

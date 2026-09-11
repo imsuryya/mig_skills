@@ -13,7 +13,7 @@ The pipeline:
 ```
 Alteryx workflow
   -> Lakebridge          estate facts (inventory, complexity, endpoints, census)
-  -> deterministic parse tool-level facts (ToolIDs, configs, expressions, DAG)
+  -> deterministic parse only the gap set (ToolIDs, configs, expressions, DAG)
   -> units               dependency-ordered work items, duplicates collapsed
   -> skill retrieval     only the reference sections this unit needs
   -> gap resolution      AI used only where facts and skills run out
@@ -215,5 +215,6 @@ Alteryx semantics and the Databricks target design live in the sibling skill and
 the shared references; this skill retrieves from them rather than restating them:
 
 - `../alteryx-to-sdp/references/` -- workflow XML, per-tool parse reference,
-  formula syntax, Alteryx-to-Spark translation.
+  formula syntax, Alteryx-to-Spark translation, and `lakebridge-gap-set.md`:
+  which facts come from the Analyzer and which only a parse can produce.
 - `../../references/` -- SDP target patterns, production hardening, optimization.

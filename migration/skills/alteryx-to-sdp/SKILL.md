@@ -21,6 +21,7 @@ This skill **reads** Alteryx artifacts; it does not build, mutate, or run them. 
 
 Skill-local (Alteryx side):
 
+- `references/lakebridge-gap-set.md` — what Lakebridge Analyzer already produces and what only a parse can produce. Read this **before** Phase 1; it decides what you parse.
 - `references/workflow-xml.md` — the `.yxmd` / `.yxmc` / `.yxwz` XML model.
 - `references/tool-parse-reference.md` — what `Configuration` to extract per tool.
 - `references/designer-tool-reference.yaml` — plugin names, palettes, anchor names.
@@ -46,9 +47,13 @@ Before parsing, establish and record (state anything the user has not provided a
 - Target Databricks context: Unity Catalog catalog and schema, workspace, whether Databricks Asset Bundles (DAB) are in use, orchestration tool, secret scopes.
 - Whether golden-output parity testing is in scope and whether a licensed Alteryx Engine is available.
 
-## Phase 1 — Exhaustive Parse (Raw XML Only)
+## Phase 1 — Exhaustive Parse (the Lakebridge gap set)
 
-Parse the workflow XML directly as the source of truth — never a condensed view. Read `references/workflow-xml.md` and `references/tool-parse-reference.md`; use `references/designer-tool-reference.yaml` to resolve names.
+**First, establish the division of labor.** If a Lakebridge Analyzer report exists for this workflow — or can be produced (`databricks labs lakebridge analyze --source-directory <dir> --report-file <out.xlsx> --source-tech alteryx --generate-json true`) — read `references/lakebridge-gap-set.md` and take these from it rather than re-deriving them: the object inventory and complexity band, the tool/transformation census, the function census, the SQL statements and objects each Input/Output touches, and the checksums. Scope every Analyzer read to the target workflow's own `sourceFile`; the Analyzer sweeps whole directories and its estate totals are not this workflow's totals. If no report exists, parse the full set and record in the plan that the complexity band and the independent cross-check are unavailable.
+
+**Then parse the gap set, exhaustively.** Everything below is per-`ToolID`, positional, or relational — which is precisely what the Analyzer does not emit for Alteryx (Analyzer-only support matrix: no ToolIDs, no per-tool configuration, no connection graph). Parse the workflow XML directly as the source of truth — never a condensed view. Read `references/workflow-xml.md` and `references/tool-parse-reference.md`; use `references/designer-tool-reference.yaml` to resolve names.
+
+Exhaustive applies to the gap set, not to the whole report. Do not build an inventory sheet that restates an Analyzer sheet — no tool-type count summary, no standalone formula list, no complexity score, no checksums. Cite the Analyzer sheet instead.
 
 For a large workflow, write a small parser script (Python `xml.etree`) that emits a structured inventory (nodes, configs, connections, topological order) rather than hand-transcribing hundreds of tools. Keep the script; cite it in the plan appendix.
 
@@ -63,7 +68,7 @@ Produce a **Workflow Inventory** covering:
 - **Engine and runtime.** Effective AMP/E2 vs legacy E1 (`RunE2`, `RunWithE2`), `GlobalRecordLimit`, `ConvErrorLimit` + stop-on-error, runtime constants, `Events` (pre/post-run commands, email, run-command).
 - **Determinism hazards.** `DateTimeNow` / `DateTimeToday`, `RAND` / `RandInt`, `Directory` + globs, `GetEnvironmentVariable`, `ReadRegistryString`, absolute local paths, hard-coded credentials / connection strings, sort-order-dependent logic (Sample first-N, Unique first-match, Multi-Row Formula, Running-Total==1 top-1 patterns), implicit type coercions.
 
-End Phase 1 with a **coverage check**: nodes found vs documented, connections found vs documented, every macro file parsed. Counts must match before continuing.
+End Phase 1 with a **coverage check**: nodes found vs documented, connections found vs documented, every macro file parsed. Counts must match before continuing. Where an Analyzer report exists, also **cross-check** its tool census against the parse's — two independent counts agreeing is evidence neither side dropped a tool. That is the only purpose the parse's own census serves; it is not a deliverable alongside the Analyzer's.
 
 ## Phase 2 — Semantic Model and Lineage
 
@@ -116,7 +121,7 @@ Write the plan as Markdown next to the source workflow (or where the user asks).
 
 - **`summary-plan.md`** — source summary (every input, its filter, what it feeds), the transformation narrative stage by stage, and the shape/schema of the final output data.
 - **`sdp-plan.md`** — the layer-by-layer Databricks SDP build in PySpark: for each layer, all sources in and all transformations out, with runnable DataFrame-API code, expectations, parameters, the semantic-delta handling, the optimization design, risks, DAB skeleton, and build order.
-- **`workflow-inventory.md`** — Phase-1 exhaustive parse, one entry per ToolID, verbatim config, grouped by container in topological order.
+- **`workflow-inventory.md`** — Phase-1 parse of the gap set, one entry per ToolID, verbatim config, grouped by container in topological order. Estate facts are cited from the Analyzer report, not copied into it.
 - **`transformation-map.csv`** — Phase-4 map, one row per ToolID.
 
 A single combined `migration-plan.md` is acceptable if the user prefers it; it then contains, in order: executive summary + scope + open questions; the exhaustive inventory + coverage check; semantic model + lineage + semantic-delta list; target architecture + DAB skeleton + parameters/secrets; tool-by-tool map; DQ expectations + parity/test plan; optimization design; deployment & operations (DAB targets, pipeline settings, job graph, UC objects/grants, CI/CD gates, observability queries/alerts); phased rollout; risk register; effort estimate.
@@ -126,6 +131,7 @@ If the user asks for the pipeline code itself, generate it against the plan as a
 ## Shared Rules
 
 - Parse from raw XML only. Cite configuration from the file; never assume it.
+- Parse only what Lakebridge Analyzer cannot produce — the DAG, execution order, per-tool configuration, macro internals, containers, determinism hazards. Cite the Analyzer for the rest rather than recomputing it (`references/lakebridge-gap-set.md`).
 - Recurse into every referenced macro. An unparsed macro is an incomplete plan.
 - **Target code is the PySpark DataFrame API.** No `spark.sql("…")`, no `.selectExpr`, no `F.expr` for logic with a typed API. The only allowed strings are `@dlt.expect_*` predicates and spatial-library Python callables' arguments.
 - **No `F.current_date()` / `F.current_timestamp()` in transformations.** Every wall-clock reference becomes a `pipeline.run_date` parameter.

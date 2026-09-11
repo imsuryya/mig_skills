@@ -26,6 +26,12 @@ the statement's shape). For Alteryx, Lakebridge's support matrix lists Analyzer
 only -- not Converter, not Reconcile -- so it does not produce ToolIDs,
 per-tool configuration, or the connection graph. Do not wait for it to.
 
+The parse covers the complement of that list and nothing else -- the **gap
+set**. `../../alteryx-to-sdp/references/lakebridge-gap-set.md` has it fact by
+fact; the short form is that everything the Analyzer misses is per-`ToolID`,
+positional, or relational. Expressions are the one deliberate overlap: the
+Analyzer lists them, but not bound to a `ToolID`, and codegen needs the binding.
+
 **The deterministic XML parse** (`engine/mig/sources/alteryx.py`) supplies tool-level facts:
 every `Node` including nested `ChildNodes` and disabled tools, verbatim
 `Configuration`, every expression, every connection with its anchors, macro
@@ -45,6 +51,11 @@ Guarantees:
   distinct macro rather than one per call site. Designer's bundled macros
   (`Cleanse.yxmc`, the Predictive Tools set) are recognized: their documented
   behavior is recorded and the gap is non-blocking, for confirmation.
+- Analyzer rows are **scoped to this workflow** before anything reads them.
+  `analyze --source-directory` sweeps a whole tree -- on the reference run,
+  ~23 objects from 8+ unrelated folders -- so only rows whose `source_file`
+  matches a file the parse actually walked count toward the census or supply
+  endpoints. `mig extract` reports how many rows it ignored.
 - The **cross-check** compares Lakebridge's census with the parse after
   normalizing both to bare tool names. Agreement is real evidence that neither
   side dropped anything; disagreement is a finding to resolve, not a warning to

@@ -42,6 +42,17 @@ per-tool configuration, and no connection graph in its output. It will not
 convert Alteryx to PySpark. Anyone expecting a one-click conversion should be
 told plainly that conversion and output validation remain engineering scope.
 
+**What to parse, then.** Only the gap set: the DAG, execution order, per-tool
+configuration, macro internals, containers, determinism hazards, and the
+`ToolID`s everything hangs off. Never re-derive a fact the Analyzer already
+produced -- `../../alteryx-to-sdp/references/lakebridge-gap-set.md` is the
+fact-by-fact split, verified against a real Analyzer run.
+
+**Scope the report.** `--source-directory` sweeps a whole tree; on the reference
+run it pulled in ~23 objects from 8+ unrelated folders. Point it at a directory
+holding only the target workflow and its macros, or filter every read by
+`sourceFile`. An estate total is not a workflow total.
+
 **Why both sources.** The tool census is an *independent* count. Comparing it
 against the XML parse is real evidence that neither side dropped anything --
 `mig extract` reports this as the cross-check, and structural validation records

@@ -486,6 +486,50 @@ class TestLakebridge(Base):
         cc = lakebridge.cross_check(self.con)
         self.assertTrue(any(d["tool"] == "formula" for d in cc["mismatched_types"]))
 
+    def test_cross_check_ignores_files_this_workflow_never_referenced(self):
+        """`analyze --source-directory` sweeps a whole tree. A neighbour's tools
+        must not land in this workflow's census."""
+        self.extract()
+        import json
+        census = {}
+        for r in self.con.execute("SELECT tool_name, count(*) c FROM nodes GROUP BY 1"):
+            census[r["tool_name"]] = r["c"]
+        self.con.executemany(
+            "INSERT INTO lakebridge(source_file,name,complexity,type,node_census,"
+            "func_census,statements) VALUES(?,?,?,?,?,?,?)",
+            # The analyzer reports Windows paths with backslashes; the in-scope
+            # filter has to normalize before comparing basenames.
+            [(r"C:\reports\mini_workflow.yxmd", "mini", "LOW", "JOB",
+              json.dumps(census), "{}", "[]"),
+             (r"C:\Users\x\Downloads\unrelated.yxmd", "other", "HIGH", "JOB",
+              json.dumps({"AlteryxFormula": 400}), "{}", "[]")])
+        self.con.commit()
+        cc = lakebridge.cross_check(self.con)
+        self.assertEqual(cc["mismatched_types"], [])
+        self.assertEqual(cc["files_out_of_scope"], 1)
+
+    def test_endpoints_ignore_out_of_scope_files(self):
+        """A neighbouring workflow can reuse our ToolIDs; its statements must not
+        be attributed to our unit."""
+        self.extract()
+        units.build(self.con, max_unit=10, min_unit=1)
+        import json
+        row = self.con.execute(
+            "SELECT u.unit_id, n.tool_id FROM unit_nodes u JOIN nodes n USING(node_key) "
+            "WHERE n.is_io=1 LIMIT 1").fetchone()
+        if row is None:
+            self.skipTest("fixture has no IO tool in a unit")
+        self.con.execute(
+            "INSERT INTO lakebridge(source_file,name,complexity,type,node_census,"
+            "func_census,statements) VALUES(?,?,?,?,?,?,?)",
+            ("C:/Users/x/Downloads/unrelated.yxmd", "other", "HIGH", "JOB", "{}", "{}",
+             json.dumps([{"nodeName": "FileInput_%s" % row["tool_id"],
+                          "connectionType": "ODBC", "objects": ["other.tbl"],
+                          "actions": ["READ"], "complexity": "LOW",
+                          "sql_chars": 10, "sql_head": "select 1"}])))
+        self.con.commit()
+        self.assertEqual(context.lakebridge_endpoints(self.con, row["unit_id"]), [])
+
     def test_analyzer_command_shape(self):
         cmd = lakebridge.analyzer_command("/src", "/out/report.xlsx")
         self.assertEqual(cmd[:4], ["databricks", "labs", "lakebridge", "analyze"])

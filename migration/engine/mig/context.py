@@ -92,8 +92,16 @@ def lakebridge_endpoints(con, unit_id):
         "WHERE u.unit_id=? AND n.is_io=1", (unit_id,))}
     if not want:
         return []
+    # Only rows for files this parse actually walked: the analyzer sweeps whole
+    # directories, and an unrelated workflow beside ours can carry the same
+    # ToolID, which would attribute its endpoints to our unit.
+    parsed = {os.path.basename(r["path"].replace("\\", "/")).lower()
+              for r in con.execute("SELECT path FROM files")}
     out, unmatched = [], []
-    for row in con.execute("SELECT statements FROM lakebridge"):
+    for row in con.execute("SELECT source_file, statements FROM lakebridge"):
+        if parsed and os.path.basename(
+                (row["source_file"] or "").replace("\\", "/")).lower() not in parsed:
+            continue
         for st in json.loads(row["statements"] or "[]"):
             m = _NODENAME_ID.search(st.get("nodeName") or "")
             rec = {"node": st.get("nodeName"), "connection": st.get("connectionType"),

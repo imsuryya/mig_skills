@@ -154,6 +154,10 @@ def cmd_extract(args):
             cc["lakebridge_total"], cc["parsed_total"],
             "agree" if not cc["mismatched_types"]
             else "%d type(s) disagree" % len(cc["mismatched_types"])))
+        if cc["files_out_of_scope"]:
+            lines.append("  (%d analyzer file(s) outside this workflow ignored; "
+                         "point --lakebridge-dir at a folder holding only the "
+                         "workflow and its macros)" % cc["files_out_of_scope"])
     else:
         lines.append("cross-check: skipped (no lakebridge report)")
     if stats["unresolved_macros"]:
