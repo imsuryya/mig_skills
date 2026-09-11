@@ -300,6 +300,33 @@ def cmd_gap(args):
                for r in rows] or ["no gaps"])
 
 
+def cmd_unrecord(args):
+    """Detach an artifact from a unit.
+
+    `record` can attach but nothing could detach, so an attribution recorded in
+    error -- a shared helper credited to a unit it turns out not to implement --
+    could not be corrected through the CLI, only by editing state.db by hand.
+    """
+    run = _run_dir(args)
+    con = db.connect(run)
+    if args.path:
+        p = os.path.abspath(args.path)
+        cur = con.execute("DELETE FROM artifacts WHERE unit_id=? AND path=?",
+                          (args.unit, p))
+    else:
+        cur = con.execute("DELETE FROM artifacts WHERE unit_id=?", (args.unit,))
+    n = cur.rowcount
+    left = con.execute("SELECT count(*) c FROM artifacts WHERE unit_id=?",
+                       (args.unit,)).fetchone()["c"]
+    if not left:
+        con.execute("UPDATE units SET status=?, updated_at=? WHERE unit_id=? "
+                    "AND status='generated'", ("pending", db.now(), args.unit))
+    con.commit()
+    _emit(args, {"unit": args.unit, "removed": n, "remaining": left},
+          ["%s: removed %d artifact(s), %d remaining" % (args.unit, n, left)])
+    con.close()
+
+
 def cmd_record(args):
     run = _run_dir(args)
     con = db.connect(run)
@@ -663,6 +690,12 @@ def build_parser():
     s.add_argument("--role", default="sdp", choices=["pyspark", "sdp", "test", "doc"])
     s.add_argument("--layer")
     s.set_defaults(func=cmd_record)
+
+    s = sub.add_parser("unrecord", help="detach an artifact from a unit")
+    s.add_argument("unit")
+    s.add_argument("path", nargs="?",
+                   help="artifact to detach; omit to detach all for the unit")
+    s.set_defaults(func=cmd_unrecord)
 
     s = sub.add_parser("layer", help="assign a medallion layer to a unit")
     s.add_argument("unit")

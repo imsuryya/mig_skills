@@ -292,16 +292,26 @@ def semantic(con, unit_id, artifact_paths=None):
             "WHERE un.unit_id=? AND n.disabled=0 GROUP BY 1", (unit_id,)):
         census[r["tool_name"]] = r["c"]
 
+    # Some tool classes legitimately leave no trace of their own: Alteryx has no
+    # outer join, so it writes one as Join + Union of two anchors, which is a
+    # single joion in Spark. The source adapter folds those away before the
+    # construct check so they are not reported as missing code.
+    fold_notes = []
+    if hasattr(source, "adjust_census"):
+        fold_notes = source.adjust_census(con, unit_id, census) or []
+
     # Generic: every tool class must show its target construct somewhere.
     missing = []
     for tool, count in sorted(census.items()):
         req = source.required_constructs.get(tool)
         if req and not req[0].search(src):
             missing.append("%s x%d -> no %s in the code" % (tool, count, req[1]))
+    _detail = ("every tool class has its target construct" if not missing
+               else "; ".join(missing[:8]))
+    if fold_notes:
+        _detail += " [folded: %s]" % "; ".join(fold_notes[:4])
     _record(con, unit_id, "semantic", "tool-constructs",
-            "pass" if not missing else "fail",
-            "every tool class has its target construct" if not missing
-            else "; ".join(missing[:8]))
+            "pass" if not missing else "fail", _detail)
 
     # Generic: every field the source unit creates must exist in the target.
     created = _created_fields(con, unit_id)

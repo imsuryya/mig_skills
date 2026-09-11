@@ -684,6 +684,75 @@ required_constructs = {
                         "row_number/monotonically_increasing_id"),
 }
 
+def adjust_census(con, unit_id, census):
+    """Fold away tool counts whose construct legitimately disappears in Spark.
+
+    Alteryx has no outer join. The idiom is a `Join` tool with its `Join` anchor
+    and its `Left` (and for a full outer, `Right`) anchor both feeding one
+    `Union`: matched rows down one branch, unmatched down the other, recombined.
+    In Spark that is one `.join(..., how="left"|"full")` and there is no union
+    left to find, so requiring `unionByName` for these would force either a
+    contrived second join or a permanent false failure. In the workflow this was
+    written against, 57 of 83 Union tools are this idiom.
+
+    Only unions fed by two or more anchors of the *same* join node are folded; a
+    real union of two different streams still requires `unionByName`.
+
+    Returns a list of human-readable notes describing what was folded.
+    """
+    keys = {r["node_key"] for r in con.execute(
+        "SELECT node_key FROM unit_nodes WHERE unit_id=?", (unit_id,))}
+    if not keys:
+        return []
+    inbound = {}
+    for e in con.execute("SELECT origin,origin_anchor,dest FROM edges"):
+        inbound.setdefault(e["dest"], set()).add((e["origin"], e["origin_anchor"]))
+    joins = {r["node_key"] for r in con.execute(
+        "SELECT node_key FROM nodes WHERE tool_name IN ('Join','JoinMultiple')")}
+    # Tools that transform columns without adding or dropping rows. The matched
+    # branch of the idiom often passes through one before the union, and that
+    # does not stop it being an outer join.
+    passthrough = {"Formula", "AlteryxSelect", "MultiFieldFormula",
+                   "MultiFieldBinning", "DynamicRename", "RecordID"}
+
+    def trace(origin, anchor, seen=None):
+        """Follow a union input back to the anchor it really comes from."""
+        seen = seen or set()
+        while origin not in seen:
+            seen.add(origin)
+            row = con.execute(
+                "SELECT tool_name FROM nodes WHERE node_key=?", (origin,)).fetchone()
+            if not row or row["tool_name"] not in passthrough:
+                break
+            ups = inbound.get(origin, ())
+            if len(ups) != 1:
+                break
+            origin, anchor = next(iter(ups))
+        return origin, anchor
+
+    notes = []
+    for nk in sorted(keys):
+        row = con.execute(
+            "SELECT tool_name FROM nodes WHERE node_key=?", (nk,)).fetchone()
+        if not row or row["tool_name"] != "Union":
+            continue
+        by_origin = {}
+        for origin, anchor in inbound.get(nk, ()):
+            origin, anchor = trace(origin, anchor)
+            by_origin.setdefault(origin, set()).add(anchor)
+        for origin, anchors in by_origin.items():
+            if origin in joins and len(anchors) >= 2:
+                kind = "full outer" if "Right" in anchors else "left outer"
+                census["Union"] = census.get("Union", 0) - 1
+                if census.get("Union", 0) <= 0:
+                    census.pop("Union", None)
+                notes.append(
+                    "%s is the %s join idiom on %s (anchors %s), satisfied by a "
+                    "join, not a union" % (nk, kind, origin, "+".join(sorted(anchors))))
+                break
+    return notes
+
+
 def _window_order_args(src):
     """Argument text of every ``Window.partitionBy(...).orderBy(...)``.
 
@@ -747,7 +816,16 @@ def semantic_checks(ctx):
 
     # Ordered operations need a deterministic order, including a tiebreak.
     ordered = sum(census.get(t, 0) for t in ORDER_DEPENDENT)
-    if ordered:
+
+    # A `Unique` written as a subset-less `dropDuplicates()` keeps one of a set
+    # of *identical* rows, so there is no choice to make and no order to fix.
+    # (`dropDuplicates(subset)` is different: it keeps an arbitrary row from a
+    # group that may differ outside the subset, and still needs an order.)
+    if census.get("Unique"):
+        bare_dedupe = len(re.findall(r"\.\s*dropDuplicates\s*\(\s*\)", src))
+        ordered -= min(bare_dedupe, census["Unique"])
+
+    if ordered > 0:
         wins = _window_order_args(src)
         has_order = bool(wins) or bool(re.search(r"\.\s*orderBy\s*\(", src))
         if not has_order:

@@ -21,6 +21,7 @@ sys.path.insert(0, ENGINE_ROOT)
 
 from mig import (context, db, export, lakebridge, plan, retrieve, sources, units,  # noqa: E402
                  validate, xlsx)
+from mig import cli  # noqa: E402
 from mig.cli import _is_complete, default_corpus  # noqa: E402
 
 parse = sources.get("alteryx")
@@ -354,6 +355,30 @@ class TestSemanticValidation(Base):
             "out = src.filter(c).groupBy('x').agg(F.stddev_pop('Amount'))\n")
         self.assertNotIn("clock-parameterized", fails)
 
+    def _add_unique_tool(self):
+        self.con.execute(
+            "INSERT INTO nodes(node_key,file_id,tool_id,tool_name,depth,disabled,"
+            "is_container,is_io) VALUES('w0:900','w0','900','Unique',0,0,0,0)")
+        self.con.execute("INSERT INTO unit_nodes(unit_id,node_key) VALUES(?,?)",
+                         (self.unit, "w0:900"))
+        self.con.commit()
+
+    def test_unique_as_subsetless_dropduplicates_needs_no_order(self):
+        """dropDuplicates() with no subset keeps one of a set of identical
+        rows, so there is no arbitrary choice for an order to pin down."""
+        self._add_unique_tool()
+        src = ("out = src.filter(c).dropDuplicates()"
+               ".groupBy('x').agg(F.stddev_pop('a'))" + chr(10))
+        self.assertNotIn("deterministic-order", self._semantic(src))
+
+    def test_unique_with_a_subset_still_needs_an_order(self):
+        """dropDuplicates(subset) keeps an arbitrary row from a group whose
+        other columns may differ -- the case the rule exists for."""
+        self._add_unique_tool()
+        src = ("out = src.filter(c).dropDuplicates(['k'])"
+               ".groupBy('x').agg(F.stddev_pop('a'))" + chr(10))
+        self.assertIn("deterministic-order", self._semantic(src))
+
     def test_created_fields_must_appear_in_the_code(self):
         fails = self._semantic("out = src.filter(c).groupBy('x').agg(F.stddev_pop('a'))\n")
         self.assertIn("created-fields-present", fails)
@@ -439,6 +464,65 @@ class TestCompletionGate(Base):
         self.assertIn(verdict, ("failed", "blocked"))
 
 
+class TestUnrecord(Base):
+    """`record` could attach an artifact but nothing could detach one, so an
+    attribution made in error could only be undone by editing state.db."""
+
+    def _unit(self):
+        self.extract()
+        units.build(self.con, max_unit=10, min_unit=1)
+        return self.con.execute("SELECT unit_id FROM units LIMIT 1").fetchone()["unit_id"]
+
+    def _args(self, unit, path=None):
+        class A:
+            pass
+        a = A()
+        a.run, a.unit, a.path = self.run, unit, path
+        a.json = a.compact = False
+        return a
+
+    def test_unrecord_removes_one_artifact_and_reverts_status(self):
+        uid = self._unit()
+        src = os.path.join(self.run, "g.py")
+        with open(src, "w", encoding="utf-8") as fh:
+            fh.write("x = 1\n")
+        self.con.execute(
+            "INSERT INTO artifacts(unit_id,path,role,sha256,written_at) "
+            "VALUES(?,?,?,?,?)", (uid, os.path.abspath(src), "pyspark", "s", 0))
+        self.con.execute("UPDATE units SET status='generated' WHERE unit_id=?", (uid,))
+        self.con.commit()
+        cli.cmd_unrecord(self._args(uid, src))
+        con2 = db.connect(self.run)
+        self.assertEqual(con2.execute(
+            "SELECT count(*) c FROM artifacts WHERE unit_id=?", (uid,)).fetchone()["c"], 0)
+        self.assertEqual(con2.execute(
+            "SELECT status FROM units WHERE unit_id=?", (uid,)).fetchone()["status"],
+            "pending")
+        con2.close()
+
+    def test_unrecord_keeps_status_while_another_artifact_remains(self):
+        uid = self._unit()
+        paths = []
+        for name in ("a.py", "b.py"):
+            src = os.path.join(self.run, name)
+            with open(src, "w", encoding="utf-8") as fh:
+                fh.write("x = 1\n")
+            paths.append(os.path.abspath(src))
+            self.con.execute(
+                "INSERT INTO artifacts(unit_id,path,role,sha256,written_at) "
+                "VALUES(?,?,?,?,?)", (uid, os.path.abspath(src), "pyspark", "s", 0))
+        self.con.execute("UPDATE units SET status='generated' WHERE unit_id=?", (uid,))
+        self.con.commit()
+        cli.cmd_unrecord(self._args(uid, paths[0]))
+        con2 = db.connect(self.run)
+        self.assertEqual(con2.execute(
+            "SELECT count(*) c FROM artifacts WHERE unit_id=?", (uid,)).fetchone()["c"], 1)
+        self.assertEqual(con2.execute(
+            "SELECT status FROM units WHERE unit_id=?", (uid,)).fetchone()["status"],
+            "generated")
+        con2.close()
+
+
 class TestPlanProjection(Base):
     def test_plan_files_are_written_and_reflect_state(self):
         self.extract()
@@ -475,6 +559,34 @@ class TestLakebridge(Base):
         self.con.commit()
         cc = lakebridge.cross_check(self.con)
         self.assertEqual(cc["mismatched_types"], [])
+
+    def test_cross_check_ignores_tools_inside_expanded_macros(self):
+        """The analyzer reports per file and never descends into a macro, while
+        the parse expands macro bodies. Counting every parsed node against a
+        workflow-only census makes any macro-calling workflow disagree forever,
+        and no amount of migration work can clear that failure."""
+        self.extract()
+        census = {}
+        for r in self.con.execute(
+                "SELECT tool_name, count(*) c FROM nodes WHERE file_id='w0' GROUP BY 1"):
+            census[r["tool_name"]] = r["c"]
+        self.con.execute(
+            "INSERT INTO files(file_id,path,kind,macro_type,sha256,tool_count,"
+            "parsed_at) VALUES('m1',?,'macro','standard','deadbeef',2,0)",
+            (os.path.join(os.path.dirname(FIXTURE), "Cleanse.yxmc"),))
+        self.con.executemany(
+            "INSERT INTO nodes(node_key,file_id,tool_id,tool_name,depth,disabled,"
+            "is_container,is_io) VALUES(?,?,?,?,0,0,0,0)",
+            [("m1:1", "m1", "1", "AlteryxFormula"),
+             ("m1:2", "m1", "2", "AlteryxSelect")])
+        self.con.execute(
+            "INSERT INTO lakebridge(source_file,name,complexity,type,node_census,"
+            "func_census,statements) VALUES(?,?,?,?,?,?,?)",
+            ("mini_workflow.yxmd", "mini", "LOW", "JOB", json.dumps(census), "{}", "[]"))
+        self.con.commit()
+        cc = lakebridge.cross_check(self.con)
+        self.assertEqual(cc["mismatched_types"], [])
+        self.assertEqual(cc["parsed_total"], sum(census.values()))
 
     def test_cross_check_reports_a_missing_tool(self):
         self.extract()

@@ -119,18 +119,22 @@ def in_scope(con):
     the parse actually walked -- the workflow and the macros it reaches -- so an
     estate total is never mistaken for a workflow total.
     """
-    parsed = {os.path.basename(os.path.normpath(r["path"].replace("\\", "/"))).lower()
-              for r in con.execute("SELECT path FROM files")}
+    parsed = {}
+    for r in con.execute("SELECT file_id, path FROM files"):
+        key = os.path.basename(os.path.normpath(r["path"].replace("\\", "/"))).lower()
+        parsed[key] = r["file_id"]
     if not parsed:
-        return None, 0
-    rows, out_of_scope = [], 0
+        return None, 0, set()
+    rows, out_of_scope, file_ids = [], 0, set()
     for row in con.execute("SELECT source_file, node_census FROM lakebridge"):
         src = (row["source_file"] or "").replace("\\", "/")
-        if os.path.basename(src).lower() in parsed:
+        fid = parsed.get(os.path.basename(src).lower())
+        if fid is not None:
             rows.append(row)
+            file_ids.add(fid)
         else:
             out_of_scope += 1
-    return rows, out_of_scope
+    return rows, out_of_scope, file_ids
 
 
 def normalize_tool_name(name):
@@ -163,7 +167,7 @@ def census_compare(con, allow_unscoped=False):
     ``scope_matched``; validation leaves it False so the check still refuses to
     claim a pass it did not earn.
     """
-    scoped, out_of_scope = in_scope(con)
+    scoped, out_of_scope, file_ids = in_scope(con)
     if scoped is None:
         return None
     scope_matched = bool(scoped)
@@ -171,7 +175,7 @@ def census_compare(con, allow_unscoped=False):
         if not allow_unscoped:
             return None
         scoped = list(con.execute("SELECT source_file, node_census FROM lakebridge"))
-        out_of_scope = 0
+        out_of_scope, file_ids = 0, set()
     lb = {}
     for row in scoped:
         for k, v in json.loads(row["node_census"]).items():
@@ -179,8 +183,20 @@ def census_compare(con, allow_unscoped=False):
     if not lb:
         return None
 
+    # Compare like with like. The analyzer reports per file and does not descend
+    # into macros, so count only the parsed tools belonging to the files it
+    # actually reported on. Counting every parsed node instead makes any workflow
+    # that calls a macro show a permanent false disagreement the size of the
+    # expanded macro bodies -- a failure no amount of migration work can clear.
+    if file_ids:
+        marks = ",".join("?" * len(file_ids))
+        cur = con.execute(
+            "SELECT tool_name, count(*) c FROM nodes WHERE file_id IN (%s) "
+            "GROUP BY 1" % marks, tuple(sorted(file_ids)))
+    else:
+        cur = con.execute("SELECT tool_name, count(*) c FROM nodes GROUP BY 1")
     parsed = {}
-    for row in con.execute("SELECT tool_name, count(*) c FROM nodes GROUP BY 1"):
+    for row in cur:
         parsed[row["tool_name"]] = parsed.get(row["tool_name"], 0) + row["c"]
 
     lb_n, p_n = {}, {}
